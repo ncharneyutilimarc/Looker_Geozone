@@ -1,0 +1,57 @@
+with geoevents as (
+    select
+        x.deviceidint,
+        x.deviceid,
+        case when x.geozoneid = '' then x.prev_geozoneid else x.geozoneid end as geozoneid,
+        x.timestamp,
+        x.timezone,
+        case when x.geozoneid = '' and x.prev_geozoneid <> '' then 'depart' else 'arrive' end as event_type
+    from (
+        select deviceidint, deviceid, geozoneid, lag(geozoneid) over (partition by deviceid order by e.timestamp) as prev_geozoneid,
+        e.timestamp,
+        st.timezone
+        from eventdata e
+        left join state_timezone st on e.stateprovince=st.abbreviation
+        where deviceid not like '%lytx%' AND deviceidint = 29610 -- This will change to apply to all accounts
+        and accountid = 'aep'        -- This will change to apply to all accounts
+        order by deviceid, e.timestamp
+    ) x
+    where (geozoneid <> '' or prev_geozoneid <> '')
+    and not (geozoneid <> '' and prev_geozoneid <> '')
+    and prev_geozoneid is not null
+    order by deviceid, x.timestamp
+)
+-- Final select for converting timestamps
+select *,
+    convert_timezone(timezone, dateadd(s, prev_arrive_time, '1970-01-01'))::date as prev_arrive_date,
+    convert_timezone(timezone, dateadd(s, depart_time, '1970-01-01'))::date as depart_date,
+    convert_timezone(timezone, dateadd(s, arrive_time, '1970-01-01'))::date as arrive_date,
+    extract( secs from convert_timezone(timezone, dateadd(s, prev_arrive_time, '1970-01-01'))) +
+        (extract( minutes from convert_timezone(timezone, dateadd(s, prev_arrive_time, '1970-01-01')))*60) + 
+        (extract( hours from convert_timezone(timezone, dateadd(s, prev_arrive_time, '1970-01-01')))*3600) as prev_arrive_secs,
+        
+    extract( secs from convert_timezone(timezone, dateadd(s, depart_time, '1970-01-01'))) +
+        (extract( minutes from convert_timezone(timezone, dateadd(s, depart_time, '1970-01-01')))*60) + 
+        (extract( hours from convert_timezone(timezone, dateadd(s, depart_time, '1970-01-01')))*3600) as depart_secs,
+        
+    extract( secs from convert_timezone(timezone, dateadd(s, arrive_time, '1970-01-01'))) +
+        (extract( minutes from convert_timezone(timezone, dateadd(s, arrive_time, '1970-01-01')))*60) + 
+        (extract( hours from convert_timezone(timezone, dateadd(s, arrive_time, '1970-01-01')))*3600) as arrive_secs
+from (
+    -- Sub query that uses the above sub query to get the lags and leads I need
+    select
+        deviceidint,
+        deviceid,
+        lag(geozoneid) over (partition by deviceid order by g.timestamp) as prev_arrive_zone,
+        geozoneid as depart_zone,
+        lead(geozoneid) over (partition by deviceid order by g.timestamp) as arrive_zone,
+        lag(g.timestamp) over (partition by deviceid order by g.timestamp) as prev_arrive_time,
+        g.timestamp as depart_time,
+        lead(g.timestamp) over (partition by deviceid order by g.timestamp) as arrive_time,
+        nvl(timezone, lead(timezone) over (partition by deviceid order by g.timestamp)) as timezone,
+        event_type
+    from geoevents g -- Sub Query from Above
+)
+-- Final filters to look at events from a depart "point of view"
+where event_type = 'depart'
+and arrive_zone is not null
